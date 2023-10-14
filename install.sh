@@ -95,6 +95,7 @@ checkCPUVendor() {
                 hysteriaCoreCPUVendor="hysteria-linux-amd64"
                 tuicCoreCPUVendor="-x86_64-unknown-linux-musl"
                 warpRegCoreCPUVendor="main-linux-amd64"
+                singBoxCoreCPUVendor="-linux-amd64"
                 ;;
             'armv8' | 'aarch64')
                 cpuVendor="arm"
@@ -103,6 +104,7 @@ checkCPUVendor() {
                 hysteriaCoreCPUVendor="hysteria-linux-arm64"
                 tuicCoreCPUVendor="-aarch64-unknown-linux-musl"
                 warpRegCoreCPUVendor="main-linux-arm64"
+                singBoxCoreCPUVendor="-linux-arm64"
                 ;;
             *)
                 echo "  不支持此CPU架构--->"
@@ -174,6 +176,9 @@ initVar() {
 
     # hysteria 配置文件的路径
     hysteriaConfigPath=
+
+    # sing-box配置文件路径
+    singBoxConfigPath=
     #    interfaceName=
     # 端口跳跃
     portHoppingStart=
@@ -312,20 +317,20 @@ readCustomPort() {
 readInstallType() {
     coreInstallType=
     configPath=
-    hysteriaConfigPath=
+    singBoxConfigPath=
 
     # 1.检测安装目录
     if [[ -d "/etc/v2ray-agent" ]]; then
         # 检测安装方式 v2ray-core
-        if [[ -d "/etc/v2ray-agent/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ctl" ]]; then
-            if [[ -d "/etc/v2ray-agent/v2ray/conf" && -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json" ]]; then
-                configPath=/etc/v2ray-agent/v2ray/conf/
-                if grep </etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json -q '"security": "tls"'; then
-                    coreInstallType=2
-                    ctlPath=/etc/v2ray-agent/v2ray/v2ctl
-                fi
-            fi
-        fi
+        #        if [[ -d "/etc/v2ray-agent/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ctl" ]]; then
+        #            if [[ -d "/etc/v2ray-agent/v2ray/conf" && -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json" ]]; then
+        #                configPath=/etc/v2ray-agent/v2ray/conf/
+        #                if grep </etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json -q '"security": "tls"'; then
+        #                    coreInstallType=2
+        #                    ctlPath=/etc/v2ray-agent/v2ray/v2ctl
+        #                fi
+        #            fi
+        #        fi
 
         if [[ -d "/etc/v2ray-agent/xray" && -f "/etc/v2ray-agent/xray/xray" ]]; then
             # 这里检测xray-core
@@ -349,6 +354,12 @@ readInstallType() {
         if [[ -d "/etc/v2ray-agent/tuic" && -f "/etc/v2ray-agent/tuic/tuic" ]]; then
             if [[ -d "/etc/v2ray-agent/tuic/conf" ]] && [[ -f "/etc/v2ray-agent/tuic/conf/config.json" ]]; then
                 tuicConfigPath=/etc/v2ray-agent/tuic/conf/
+            fi
+        fi
+
+        if [[ -d "/etc/v2ray-agent/sing-box" && -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+            if [[ -d "/etc/v2ray-agent/sing-box/conf" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config/tuic.json" || -f "/etc/v2ray-agent/sing-box/conf/config/hysteria2.json" ]]; then
+                singBoxConfigPath=/etc/v2ray-agent/sing-box/conf/
             fi
         fi
 
@@ -392,10 +403,10 @@ readInstallProtocolType() {
 
     done < <(find ${configPath} -name "*inbounds.json" | awk -F "[.]" '{print $1}')
 
-    if [[ -n "${hysteriaConfigPath}" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]] && grep -q 'hysteria2' </etc/v2ray-agent/sing-box/conf/config.json; then
         currentInstallProtocolType=${currentInstallProtocolType}'6'
     fi
-    if [[ -n "${tuicConfigPath}" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]] && grep -q 'tuic' </etc/v2ray-agent/sing-box/conf/config.json; then
         currentInstallProtocolType=${currentInstallProtocolType}'9'
     fi
 }
@@ -546,10 +557,45 @@ readHysteriaConfig() {
     fi
 }
 # 读取Tuic配置
-readTuicConfig() {
-    if [[ -n "${tuicConfigPath}" ]]; then
-        tuicPort=$(jq -r .server <"${tuicConfigPath}config.json" | cut -d ':' -f 4)
-        tuicAlgorithm=$(jq -r .congestion_control <"${tuicConfigPath}config.json")
+readSingBoxConfig() {
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
+        if grep -q 'tuic' </etc/v2ray-agent/sing-box/conf/config.json; then
+            tuicPort=$(jq -r '.inbounds[]|select(.type=="tuic")|(.listen_port)' <"${singBoxConfigPath}config.json")
+            tuicAlgorithm=$(jq -r '.inbounds[]|select(.type=="tuic")|(.congestion_control)' <"${singBoxConfigPath}config.json")
+        fi
+
+        if grep -q 'hysteria2' </etc/v2ray-agent/sing-box/conf/config.json; then
+            hysteriaPort=$(jq -r '.inbounds[]|select(.type=="hysteria2")|(.listen_port)' <"${singBoxConfigPath}config.json")
+        fi
+    fi
+}
+# 卸载 sing-box
+unInstallSingBox() {
+    local type=$1
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
+        if grep -q 'tuic' </etc/v2ray-agent/sing-box/conf/config.json && [[ "${type}" == "tuic" ]]; then
+            rm "${singBoxConfigPath}config/tuic.json"
+            echoContent green " ---> 删除sing-box tuic配置成功"
+        fi
+
+        if grep -q 'hysteria2' </etc/v2ray-agent/sing-box/conf/config.json && [[ "${type}" == "hysteria2" ]]; then
+            rm "${singBoxConfigPath}config/hysteria2.json"
+            echoContent green " ---> 删除sing-box hysteria2配置成功"
+        fi
+        rm "${singBoxConfigPath}config.json"
+    fi
+
+    readInstallType
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        echoContent yellow " ---> 检测到有其他配置，保留sing-box核心"
+        handleSingBox stop
+        handleSingBox start
+    else
+        handleSingBox stop
+        rm /etc/systemd/system/sing-box.service
+        rm -rf /etc/v2ray-agent/sing-box/*
+        echoContent green " ---> sing-box 卸载完成"
     fi
 }
 # 读取xray reality配置
@@ -715,11 +761,12 @@ showInstallStatus() {
 
 # 清理旧残留
 cleanUp() {
-    if [[ "$1" == "v2rayClean" ]]; then
-        rm -rf "$(find /etc/v2ray-agent/v2ray/* | grep -E '(config_full.json|conf)')"
-        handleV2Ray stop >/dev/null
-        rm -f /etc/systemd/system/v2ray.service
-    elif [[ "$1" == "xrayClean" ]]; then
+    #    if [[ "$1" == "v2rayClean" ]]; then
+    #        rm -rf "$(find /etc/v2ray-agent/v2ray/* | grep -E '(config_full.json|conf)')"
+    #        handleV2Ray stop >/dev/null
+    #        rm -f /etc/systemd/system/v2ray.service
+    #    el
+    if [[ "$1" == "xrayClean" ]]; then
         rm -rf "$(find /etc/v2ray-agent/xray/* | grep -E '(config_full.json|conf)')"
         handleXray stop >/dev/null
         rm -f /etc/systemd/system/xray.service
@@ -766,6 +813,8 @@ mkdirTools() {
     mkdir -p /etc/v2ray-agent/warp
 
     mkdir -p /etc/v2ray-agent/tuic/conf
+
+    mkdir -p /etc/v2ray-agent/sing-box/conf/config
 }
 
 # 安装工具包
@@ -1919,6 +1968,36 @@ installHysteria() {
 
 }
 
+# 安装 sing-box
+installSingBox() {
+    readInstallType
+    echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
+
+    if [[ -z "${singBoxConfigPath}" ]]; then
+
+        version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=10" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        echoContent green " ---> sing-box版本:${version}"
+
+        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+
+        tar zxvf "/etc/v2ray-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz" -C "/etc/v2ray-agent/sing-box/" >/dev/null 2>&1
+
+        mv "/etc/v2ray-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/v2ray-agent/sing-box/sing-box
+        rm -rf /etc/v2ray-agent/sing-box/sing-box-*
+        chmod 655 /etc/v2ray-agent/sing-box/sing-box
+
+    else
+        echoContent green " ---> sing-box版本:v$(/etc/v2ray-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
+        read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
+        if [[ "${reInstallSingBoxStatus}" == "y" ]]; then
+            rm -f /etc/v2ray-agent/sing-box/sing-box
+            installSingBox "$1"
+        fi
+    fi
+
+}
+
 # 安装 tuic
 installTuic() {
     readInstallType
@@ -2265,38 +2344,38 @@ checkGFWStatue() {
 }
 
 # V2Ray开机自启
-installV2RayService() {
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 配置V2Ray开机自启"
-    if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
-        rm -rf /etc/systemd/system/v2ray.service
-        touch /etc/systemd/system/v2ray.service
-        execStart='/etc/v2ray-agent/v2ray/v2ray -confdir /etc/v2ray-agent/v2ray/conf'
-        cat <<EOF >/etc/systemd/system/v2ray.service
-[Unit]
-Description=V2Ray - A unified platform for anti-censorship
-Documentation=https://v2ray.com https://guide.v2fly.org
-After=network.target nss-lookup.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=yes
-ExecStart=${execStart}
-Restart=on-failure
-RestartPreventExitStatus=23
-LimitNPROC=10000
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable v2ray.service
-        echoContent green " ---> 配置V2Ray开机自启成功"
-    fi
-}
+#installV2RayService() {
+#    echoContent skyBlue "\n进度  $1/${totalProgress} : 配置V2Ray开机自启"
+#    if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
+#        rm -rf /etc/systemd/system/v2ray.service
+#        touch /etc/systemd/system/v2ray.service
+#        execStart='/etc/v2ray-agent/v2ray/v2ray -confdir /etc/v2ray-agent/v2ray/conf'
+#        cat <<EOF >/etc/systemd/system/v2ray.service
+#[Unit]
+#Description=V2Ray - A unified platform for anti-censorship
+#Documentation=https://v2ray.com https://guide.v2fly.org
+#After=network.target nss-lookup.target
+#Wants=network-online.target
+#
+#[Service]
+#Type=simple
+#User=root
+#CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+#NoNewPrivileges=yes
+#ExecStart=${execStart}
+#Restart=on-failure
+#RestartPreventExitStatus=23
+#LimitNPROC=10000
+#LimitNOFILE=1000000
+#
+#[Install]
+#WantedBy=multi-user.target
+#EOF
+#        systemctl daemon-reload
+#        systemctl enable v2ray.service
+#        echoContent green " ---> 配置V2Ray开机自启成功"
+#    fi
+#}
 
 # 安装hysteria开机自启
 installHysteriaService() {
@@ -2328,33 +2407,67 @@ EOF
         echoContent green " ---> 配置Hysteria开机自启成功"
     fi
 }
+
 # 安装Tuic开机自启动
-installTuicService() {
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Tuic开机自启"
+#installTuicService() {
+#    echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Tuic开机自启"
+#    if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
+#        rm -rf /etc/systemd/system/tuic.service
+#        touch /etc/systemd/system/tuic.service
+#        execStart='/etc/v2ray-agent/tuic/tuic -c /etc/v2ray-agent/tuic/conf/config.json'
+#        cat <<EOF >/etc/systemd/system/tuic.service
+#[Unit]
+#Description=Tuic Service
+#Documentation=https://github.com/EAimTY
+#After=network.target nss-lookup.target
+#[Service]
+#User=root
+#ExecStart=${execStart}
+#Restart=on-failure
+#RestartPreventExitStatus=23
+#LimitNPROC=10000
+#LimitNOFILE=1000000
+#[Install]
+#WantedBy=multi-user.target
+#EOF
+#        systemctl daemon-reload
+#        systemctl enable tuic.service
+#        echoContent green " ---> 配置Tuic开机自启成功"
+#    fi
+#}
+
+# sing-box 自启动
+installSingBoxService() {
+    echoContent skyBlue "\n进度  $1/${totalProgress} : 配置sing-box开机自启"
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
-        rm -rf /etc/systemd/system/tuic.service
-        touch /etc/systemd/system/tuic.service
-        execStart='/etc/v2ray-agent/tuic/tuic -c /etc/v2ray-agent/tuic/conf/config.json'
-        cat <<EOF >/etc/systemd/system/tuic.service
+        rm -rf /etc/systemd/system/sing-box.service
+        touch /etc/systemd/system/sing-box.service
+        execStart='/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json'
+        cat <<EOF >/etc/systemd/system/sing-box.service
 [Unit]
-Description=Tuic Service
-Documentation=https://github.com/EAimTY
 After=network.target nss-lookup.target
+
 [Service]
 User=root
+WorkingDirectory=/root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=${execStart}
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
-RestartPreventExitStatus=23
-LimitNPROC=10000
-LimitNOFILE=1000000
+RestartSec=10
+LimitNPROC=512
+LimitNOFILE=infinity
+
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable tuic.service
-        echoContent green " ---> 配置Tuic开机自启成功"
+        systemctl enable sing-box.service
+        echoContent green " ---> 配置sing-box开机自启成功"
     fi
 }
+
 # Xray开机自启
 installXrayService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Xray开机自启"
@@ -2384,35 +2497,35 @@ EOF
 }
 
 # 操作V2Ray
-handleV2Ray() {
-    # shellcheck disable=SC2010
-    if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q v2ray.service; then
-        if [[ -z $(pgrep -f "v2ray/v2ray") ]] && [[ "$1" == "start" ]]; then
-            systemctl start v2ray.service
-        elif [[ -n $(pgrep -f "v2ray/v2ray") ]] && [[ "$1" == "stop" ]]; then
-            systemctl stop v2ray.service
-        fi
-    fi
-    sleep 0.8
-
-    if [[ "$1" == "start" ]]; then
-        if [[ -n $(pgrep -f "v2ray/v2ray") ]]; then
-            echoContent green " ---> V2Ray启动成功"
-        else
-            echoContent red "V2Ray启动失败"
-            echoContent red "请手动执行【/etc/v2ray-agent/v2ray/v2ray -confdir /etc/v2ray-agent/v2ray/conf】，查看错误日志"
-            exit 0
-        fi
-    elif [[ "$1" == "stop" ]]; then
-        if [[ -z $(pgrep -f "v2ray/v2ray") ]]; then
-            echoContent green " ---> V2Ray关闭成功"
-        else
-            echoContent red "V2Ray关闭失败"
-            echoContent red "请手动执行【ps -ef|grep -v grep|grep v2ray|awk '{print \$2}'|xargs kill -9】"
-            exit 0
-        fi
-    fi
-}
+#handleV2Ray() {
+#    # shellcheck disable=SC2010
+#    if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q v2ray.service; then
+#        if [[ -z $(pgrep -f "v2ray/v2ray") ]] && [[ "$1" == "start" ]]; then
+#            systemctl start v2ray.service
+#        elif [[ -n $(pgrep -f "v2ray/v2ray") ]] && [[ "$1" == "stop" ]]; then
+#            systemctl stop v2ray.service
+#        fi
+#    fi
+#    sleep 0.8
+#
+#    if [[ "$1" == "start" ]]; then
+#        if [[ -n $(pgrep -f "v2ray/v2ray") ]]; then
+#            echoContent green " ---> V2Ray启动成功"
+#        else
+#            echoContent red "V2Ray启动失败"
+#            echoContent red "请手动执行【/etc/v2ray-agent/v2ray/v2ray -confdir /etc/v2ray-agent/v2ray/conf】，查看错误日志"
+#            exit 0
+#        fi
+#    elif [[ "$1" == "stop" ]]; then
+#        if [[ -z $(pgrep -f "v2ray/v2ray") ]]; then
+#            echoContent green " ---> V2Ray关闭成功"
+#        else
+#            echoContent red "V2Ray关闭失败"
+#            echoContent red "请手动执行【ps -ef|grep -v grep|grep v2ray|awk '{print \$2}'|xargs kill -9】"
+#            exit 0
+#        fi
+#    fi
+#}
 
 # 操作Hysteria
 handleHysteria() {
@@ -2444,11 +2557,13 @@ handleHysteria() {
         fi
     fi
 }
+
 # 操作Tuic
 handleTuic() {
     # shellcheck disable=SC2010
     if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q tuic.service; then
         if [[ -z $(pgrep -f "tuic/tuic") ]] && [[ "$1" == "start" ]]; then
+            singBoxMergeConfig
             systemctl start tuic.service
         elif [[ -n $(pgrep -f "tuic/tuic") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop tuic.service
@@ -2474,6 +2589,39 @@ handleTuic() {
         fi
     fi
 }
+
+# 操作sing-box
+handleSingBox() {
+    # shellcheck disable=SC2010
+    if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q sing-box.service; then
+        if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
+            singBoxMergeConfig
+            systemctl start sing-box.service
+        elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
+            systemctl stop sing-box.service
+        fi
+    fi
+    sleep 0.8
+
+    if [[ "$1" == "start" ]]; then
+        if [[ -n $(pgrep -f "sing-box") ]]; then
+            echoContent green " ---> sing-box启动成功"
+        else
+            echoContent red "sing-box启动失败"
+            echoContent red "请手动执行【/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json】，查看错误日志"
+            exit 0
+        fi
+    elif [[ "$1" == "stop" ]]; then
+        if [[ -z $(pgrep -f "sing-box") ]]; then
+            echoContent green " ---> sing-box关闭成功"
+        else
+            echoContent red " ---> sing-box关闭失败"
+            echoContent red "请手动执行【ps -ef|grep -v grep|grep sing-box|awk '{print \$2}'|xargs kill -9】"
+            exit 0
+        fi
+    fi
+}
+
 # 操作xray
 handleXray() {
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
@@ -2516,12 +2664,7 @@ initXrayClients() {
         currentClients=$(echo "${currentClients}" | jq -r ". +=[${newUser}]")
     fi
     local users=
-    if [[ "${type}" == "9" ]]; then
-        users={}
-    else
-        users=[]
-    fi
-
+    users=[]
     while read -r user; do
         uuid=$(echo "${user}" | jq -r .id)
         email=$(echo "${user}" | jq -r .email | awk -F "[-]" '{print $1}')
@@ -2564,7 +2707,9 @@ initXrayClients() {
 
         # hysteria
         if echo "${type}" | grep -q "6"; then
-            users=$(echo "${users}" | jq -r ". +=[\"${uuid}\"]")
+            currentUser="{\"password\":\"${uuid}\",\"name\":\"${email}-singbox_hysteria2\"}"
+
+            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
 
         # vless reality vision
@@ -2582,7 +2727,9 @@ initXrayClients() {
         fi
         # tuic
         if echo "${type}" | grep -q "9"; then
-            users=$(echo "${users}" | jq -r ".\"${uuid}\"=\"${uuid}\"")
+            currentUser="{\"uuid\":\"${uuid}\",\"password\":\"${uuid}\",\"name\":\"${email}-singbox_tuic\"}"
+
+            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
 
     done < <(echo "${currentClients}" | jq -c '.[]')
@@ -2636,7 +2783,7 @@ addClientsHysteria() {
 
 # 初始化hysteria端口
 initHysteriaPort() {
-    readHysteriaConfig
+    readSingBoxConfig
     if [[ -n "${hysteriaPort}" ]]; then
         read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyHysteriaPortStatus
         if [[ "${historyHysteriaPortStatus}" == "y" ]]; then
@@ -2899,7 +3046,7 @@ EOF
 
 # 初始化tuic端口
 initTuicPort() {
-    readTuicConfig
+    readSingBoxConfig
     if [[ -n "${tuicPort}" ]]; then
         read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyTuicPortStatus
         if [[ "${historyTuicPortStatus}" == "y" ]]; then
@@ -2955,36 +3102,161 @@ initTuicProtocol() {
 }
 
 # 初始化tuic配置
-initTuicConfig() {
+#initTuicConfig() {
+#    echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Tuic配置"
+#
+#    initTuicPort
+#    initTuicProtocol
+#    cat <<EOF >/etc/v2ray-agent/tuic/conf/config.json
+#{
+#    "server": "[::]:${tuicPort}",
+#    "users": $(initXrayClients 9),
+#    "certificate": "/etc/v2ray-agent/tls/${currentHost}.crt",
+#    "private_key": "/etc/v2ray-agent/tls/${currentHost}.key",
+#    "congestion_control":"${tuicAlgorithm}",
+#    "alpn": ["h3"],
+#    "log_level": "warn"
+#}
+#EOF
+#}
+
+# 初始化 sing-box Tuic 配置
+initSingBoxTuicConfig() {
     echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Tuic配置"
 
     initTuicPort
     initTuicProtocol
-    cat <<EOF >/etc/v2ray-agent/tuic/conf/config.json
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/tuic.json
 {
-    "server": "[::]:${tuicPort}",
-    "users": $(initXrayClients 9),
-    "certificate": "/etc/v2ray-agent/tls/${currentHost}.crt",
-    "private_key": "/etc/v2ray-agent/tls/${currentHost}.key",
-    "congestion_control":"${tuicAlgorithm}",
-    "alpn": ["h3"],
-    "log_level": "warn"
+     "inbounds": [
+    {
+        "type": "tuic",
+        "listen": "::",
+        "tag": "singbox-tuic-in",
+        "listen_port": ${tuicPort},
+        "users": $(initXrayClients 9),
+        "congestion_control": "${tuicAlgorithm}",
+        "tls": {
+            "enabled": true,
+            "alpn": [
+                "h3"
+            ],
+            "certificate_path": "/etc/v2ray-agent/tls/${currentHost}.crt",
+            "key_path": "/etc/v2ray-agent/tls/${currentHost}.key"
+        }
+    }
+]
 }
 EOF
 }
 
-# Tuic安装
-tuicCoreInstall() {
+# 初始化sing-box socks5 出站
+initSingBoxSocks5OutboundsConfig() {
+    local uuid=
+    uuid=$(/etc/v2ray-agent/xray/xray uuid)
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/socks5_outbounds.json
+{
+     "outbounds": [
+    {
+        "type": "socks",
+        "tag": "singBoxSocks5Out",
+        "version": "5",
+        "server":"127.0.0.1",
+        "server_port":31295,
+        "username": "singBox_socks5_outbound",
+        "password": "${uuid}",
+        "network":"udp"
+    }
+]
+}
+EOF
+
+    cat <<EOF >${configPath}/02_socks_inbounds_singbox.json
+{
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 31295,
+      "protocol": "Socks",
+      "tag": "socksSingBoxOutbound",
+      "settings": {
+        "auth": "password",
+        "accounts": [
+          {
+            "user": "singBox_socks5_outbound",
+            "pass": "${uuid}"
+          }
+        ],
+        "udp": true,
+        "ip": "127.0.0.1"
+      }
+    }
+  ]
+}
+EOF
+}
+# 初始化 sing-box Hysteria2 配置
+initSingBoxHysteria2Config() {
+    echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Hysteria2配置"
+
+    initHysteriaPort
+    # todo 123123
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/hysteria2.json
+{
+    "inbounds": [
+        {
+            "type": "hysteria2",
+            "listen": "::",
+            "listen_port": ${hysteriaPort},
+            "users": $(initXrayClients 6),
+            "tls": {
+                "enabled": true,
+                "alpn": [
+                    "h3"
+                ],
+                "certificate_path": "/etc/v2ray-agent/tls/${currentHost}.crt",
+                "key_path": "/etc/v2ray-agent/tls/${currentHost}.key"
+            }
+        }
+    ]
+}
+EOF
+    #    initSingBoxSocks5OutboundsConfig
+}
+
+# sing-box Tuic安装
+singBoxTuicInstall() {
     if ! echo "${currentInstallProtocolType}" | grep -q "0" || [[ -z "${coreInstallType}" ]]; then
-        echoContent red "\n ---> 由于环境依赖，如安装Tuic，请先安装Xray-core的VLESS_TCP_TLS_Vision"
+        echoContent red "\n ---> 由于证书环境依赖，如安装Tuic，请先安装Xray-core的VLESS_TCP_TLS_Vision"
         exit 0
     fi
     totalProgress=5
-    installTuic 1
-    initTuicConfig 2
-    installTuicService 3
+    #    installTuic 1
+    installSingBox 1
+    initSingBoxTuicConfig 2
+    installSingBoxService 3
     reloadCore
     showAccounts 4
+}
+
+# sing-box hy2安装
+singBoxHysteria2Install() {
+    if ! echo "${currentInstallProtocolType}" | grep -q "0" || [[ -z "${coreInstallType}" ]]; then
+        echoContent red "\n ---> 由于证书环境依赖，如安装Hysteria2，请先安装Xray-core的VLESS_TCP_TLS_Vision"
+        exit 0
+    fi
+    totalProgress=5
+    installSingBox 1
+    initSingBoxHysteria2Config 2
+    installSingBoxService 3
+    reloadCore
+    showAccounts 4
+}
+
+# 合并config
+singBoxMergeConfig() {
+    rm /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
+    /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ >/dev/null 2>&1
 }
 
 # 初始化V2Ray 配置文件
@@ -4065,39 +4337,26 @@ EOF
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${add}%3a${currentDefaultPort}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26peer%3d${currentHost}%26type%3Dgrpc%26sni%3d${currentHost}%26path%3D${currentPath}trojangrpc%26alpn%3Dh2%26serviceName%3D${currentPath}trojangrpc%23${email}\n"
 
     elif [[ "${type}" == "hysteria" ]]; then
-        #        local hysteriaEmail=
-        #        hysteriaEmail=$(echo "${email}" | awk -F "[-]" '{print $1}')_hysteria
         echoContent yellow " ---> Hysteria(TLS)"
 
-        echoContent green "    hysteria2://${id}@${currentHost}:${hysteriaPort}?peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#hysteria2\n"
-#        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-#hysteria2://${id}@${currentHost}:${hysteriaPort}?peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#hysteria2
-#EOF
-        echoContent yellow " ---> v2rayN(hysteria+TLS)"
-        cat <<EOF >"/etc/v2ray-agent/hysteria/conf/client.json"
-{
-  "server": "${currentHost}:${hysteriaPort}",
-  "socks5": { "listen": "127.0.0.1:10808", "timeout": 300},
-  "auth":"${id}",
-  "tls":{
-    "sni":"${currentHost}"
-  }
-}
+        echoContent green "    hysteria2://${id}@${currentHost}:${hysteriaPort}?peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+hysteria2://${id}@${currentHost}:${hysteriaPort}?peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
-        local v2rayNConf=
-        v2rayNConf="$(cat /etc/v2ray-agent/hysteria/conf/client.json)"
-        echoContent green "${v2rayNConf}\n"
+        echoContent yellow " ---> v2rayN(hysteria+TLS)"
+        echo "{\"server\": \"${currentHost}:${hysteriaPort}\",\"socks5\": { \"listen\": \"127.0.0.1:10808\", \"timeout\": 300},\"auth\":\"${id}\",\"tls\":{\"sni\":\"${currentHost}\"}}" | jq
 
-#        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
-#  - name: hysteria2
-#    type: hysteria2
-#    server: ${currentHost}
-#    port: ${hysteriaPort}
-#    password: ${id}
-#    sni: ${currentHost}
-#EOF
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+  - name: "${email}"
+    type: hysteria2
+    server: ${currentHost}
+    port: ${hysteriaPort}
+    password: ${id}
+    sni: ${currentHost}
+EOF
         echoContent yellow " ---> 二维码 Hysteria(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${hysteriaPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23hysteria2\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${hysteriaPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
+
     elif [[ "${type}" == "vlessReality" ]]; then
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+Vision)"
         echoContent green "    vless://${id}@$(getPublicIP):${currentRealityPort}?encryption=none&security=reality&type=tcp&sni=${currentRealityServerNames}&fp=chrome&pbk=${currentRealityPublicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#${email}\n"
@@ -4162,31 +4421,16 @@ EOF
         fi
 
         echoContent yellow " ---> 格式化明文(Tuic+TLS)"
-        echoContent green "    协议类型:Tuic，地址:${currentHost}，端口：${tuicPort}，uuid：${id}，password：${id}，congestion-controller:${tuicAlgorithm}，alpn: h3，账户名:${email}_tuic\n"
+        echoContent green "    协议类型:Tuic，地址:${currentHost}，端口：${tuicPort}，uuid：${id}，password：${id}，congestion-controller:${tuicAlgorithm}，alpn: h3，账户名:${email}\n"
 
-        echoContent yellow " ---> v2rayN(Tuic+TLS)"
-        cat <<EOF >"/etc/v2ray-agent/tuic/conf/v2rayN.json"
-{
-    "relay": {
-        "server": "${currentHost}:${tuicPort}",
-        "uuid": "${id}",
-        "password": "${id}",
-        "ip": "$(getPublicIP)",
-        "congestion_control": "${tuicAlgorithm}",
-        "alpn": ["h3"]
-    },
-    "local": {
-        "server": "127.0.0.1:7798"
-    },
-    "log_level": "warn"
-}
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+tuic://${id}@${currentHost}:${tuicPort}?peer=${currentHost}&congestion_control=${tuicAlgorithm}&password=${id}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
-        local v2rayNConf=
-        v2rayNConf="$(cat /etc/v2ray-agent/tuic/conf/v2rayN.json)"
-        echoContent green "${v2rayNConf}"
+        echoContent yellow " ---> v2rayN(Tuic+TLS)"
+        echo "{\"relay\": {\"server\": \"${currentHost}:${tuicPort}\",\"uuid\": \"${id}\",\"password\": \"${id}\",\"ip\": \"$(getPublicIP)\",\"congestion_control\": \"${tuicAlgorithm}\",\"alpn\": [\"h3\"]},\"local\": {\"server\": \"127.0.0.1:7798\"},\"log_level\": \"warn\"}" | jq
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${email}"
-  - name: "${email}_tuic"
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+  - name: "${email}"
     server: ${currentHost}
     type: tuic
     port: ${tuicPort}
@@ -4197,14 +4441,7 @@ EOF
     congestion-controller: ${tuicAlgorithm}
     disable-sni: true
     reduce-rtt: true
-    fast-open: true
-    heartbeat-interval: 8000
-    request-timeout: 8000
-    max-udp-relay-packet-size: 1500
-    max-open-streams: 100
-    ip-version: dual
-    smux:
-        enabled: false
+    sni: ${email}
 EOF
     fi
 
@@ -4215,10 +4452,11 @@ showAccounts() {
     readInstallType
     readInstallProtocolType
     readConfigHostPathUUID
-    readHysteriaConfig
+    # readHysteriaConfig
+    readSingBoxConfig
     readXrayCoreRealityConfig
-    readHysteriaPortHopping
-    readTuicConfig
+    #    readHysteriaPortHopping
+
     echo
     echoContent skyBlue "\n进度 $1/${totalProgress} : 账号"
     local show
@@ -4343,30 +4581,10 @@ showAccounts() {
     fi
     if echo ${currentInstallProtocolType} | grep -q 6; then
         echoContent skyBlue "\n================================  Hysteria TLS  ================================\n"
-        #        echoContent red "\n --->Hysteria速度依赖与本地的网络环境，如果被QoS使用体验会非常差。IDC也有可能认为是攻击，请谨慎使用"
-
-        jq -r .auth.password ${hysteriaConfigPath}config.json | while read -r user; do
-            #            local defaultUser=
-            #            local uuidType=
-            #            uuidType=".id"
-            #
-            #            if [[ "${frontingType}" == "02_trojan_TCP_inbounds" ]]; then
-            #                uuidType=".password"
-            #            fi
-
-            #            defaultUser=$(jq '.inbounds[0].settings.clients[]|select('${uuidType}'=="'"${user}"'")' ${configPath}${frontingType}.json)
-            #            local email=
-            #            email=$(echo "${defaultUser}" | jq -r .email)
-            #            local hysteriaEmail=
-            #            hysteriaEmail=$(echo "${email}" | awk -F "[_]" '{print $1}')_hysteria
-
-            if [[ -n ${user} ]]; then
-                #                echoContent skyBlue "\n ---> 账号:$(echo "${hysteriaEmail}" | awk -F "[-]" '{print $1"_hysteria"}')"
-                echoContent skyBlue "\n ---> 账号:hysteria2"
-                echo
-                defaultBase64Code hysteria hysteria2 "${user}"
-            fi
-
+        jq -r -c '.inbounds[]|select(.type=="hysteria2")|.users[]' "${singBoxConfigPath}config.json" | while read -r user; do
+            echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
+            echo
+            defaultBase64Code hysteria "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)"
         done
 
     fi
@@ -4401,18 +4619,10 @@ showAccounts() {
     # tuic
     if echo ${currentInstallProtocolType} | grep -q 9; then
         echoContent skyBlue "\n================================  Tuic TLS  ================================\n"
-        echoContent yellow "\n --->Tuic相对于Hysteria会更加温 使用体验可能会更流畅。"
-
-        jq -r .users[] "${tuicConfigPath}config.json" | while read -r id; do
-            local tuicEmail=
-            tuicEmail=$(jq -r '.inbounds[0].settings.clients[]|select(.id=="'"${id}"'")|.email' ${configPath}${frontingType}.json | awk -F "[-]" '{print $1}')
-
-            if [[ -n ${tuicEmail} ]]; then
-                echoContent skyBlue "\n ---> 账号:${tuicEmail}_tuic"
-                echo
-                defaultBase64Code tuic "${tuicEmail}" "${id}"
-            fi
-
+        jq -r -c '.inbounds[]|select(.type=="tuic")|.users[]' "${singBoxConfigPath}config.json" | while read -r user; do
+            echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
+            echo
+            defaultBase64Code tuic "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .uuid)"
         done
 
     fi
@@ -4693,25 +4903,24 @@ unInstall() {
         handleXray stop
         rm -rf /etc/systemd/system/xray.service
         echoContent green " ---> 删除Xray开机自启完成"
-
-    elif [[ "${coreInstallType}" == "2" ]]; then
-
-        handleV2Ray stop
-        rm -rf /etc/systemd/system/v2ray.service
-        echoContent green " ---> 删除V2Ray开机自启完成"
-
     fi
 
-    if [[ -z "${hysteriaConfigPath}" ]]; then
+    if [[ -n "${hysteriaConfigPath}" ]]; then
         handleHysteria stop
         rm -rf /etc/systemd/system/hysteria.service
         echoContent green " ---> 删除Hysteria开机自启完成"
     fi
 
-    if [[ -z "${tuicConfigPath}" ]]; then
+    if [[ -n "${tuicConfigPath}" ]]; then
         handleTuic stop
         rm -rf /etc/systemd/system/tuic.service
         echoContent green " ---> 删除Tuic开机自启完成"
+    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        handleSingBox stop
+        rm -rf /etc/systemd/system/sing-box.service
+        echoContent green " ---> 删除sing-box开机自启完成"
     fi
 
     #    if [[ -f "/root/.acme.sh/acme.sh.env" ]] && grep -q 'acme.sh.env' </root/.bashrc; then
@@ -4884,7 +5093,7 @@ addUserXray() {
         fi
 
         # VLESS TCP
-        if echo "${currentInstallProtocolType}" | grep -q "0"; then
+        if echo "${currentInstallProtocolType}" | grep -q 0; then
             local clients=
             clients=$(initXrayClients 0 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}${frontingType}.json)
@@ -4892,7 +5101,7 @@ addUserXray() {
         fi
 
         # VLESS WS
-        if echo "${currentInstallProtocolType}" | grep -q "1"; then
+        if echo "${currentInstallProtocolType}" | grep -q 1; then
             local clients=
             clients=$(initXrayClients 1 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}03_VLESS_WS_inbounds.json)
@@ -4900,14 +5109,14 @@ addUserXray() {
         fi
 
         # trojan grpc
-        if echo "${currentInstallProtocolType}" | grep -q "2"; then
+        if echo "${currentInstallProtocolType}" | grep -q 2; then
             local clients=
             clients=$(initXrayClients 2 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}04_trojan_gRPC_inbounds.json)
             echo "${clients}" | jq . >${configPath}04_trojan_gRPC_inbounds.json
         fi
         # VMess WS
-        if echo "${currentInstallProtocolType}" | grep -q "3"; then
+        if echo "${currentInstallProtocolType}" | grep -q 3; then
             local clients=
             clients=$(initXrayClients 3 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}05_VMess_WS_inbounds.json)
@@ -4915,7 +5124,7 @@ addUserXray() {
         fi
 
         # trojan tcp
-        if echo "${currentInstallProtocolType}" | grep -q "4"; then
+        if echo "${currentInstallProtocolType}" | grep -q 4; then
             local clients=
             clients=$(initXrayClients 4 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}04_trojan_TCP_inbounds.json)
@@ -4923,7 +5132,7 @@ addUserXray() {
         fi
 
         # vless grpc
-        if echo "${currentInstallProtocolType}" | grep -q "5"; then
+        if echo "${currentInstallProtocolType}" | grep -q 5; then
             local clients=
             clients=$(initXrayClients 5 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}06_VLESS_gRPC_inbounds.json)
@@ -4931,7 +5140,7 @@ addUserXray() {
         fi
 
         # vless reality vision
-        if echo "${currentInstallProtocolType}" | grep -q "7"; then
+        if echo "${currentInstallProtocolType}" | grep -q 7; then
             local clients=
             clients=$(initXrayClients 7 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
@@ -4939,27 +5148,30 @@ addUserXray() {
         fi
 
         # vless reality grpc
-        if echo "${currentInstallProtocolType}" | grep -q "8"; then
+        if echo "${currentInstallProtocolType}" | grep -q 8; then
             local clients=
             clients=$(initXrayClients 8 "${uuid}" "${email}")
             clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}08_VLESS_reality_fallback_grpc_inbounds.json)
             echo "${clients}" | jq . >${configPath}08_VLESS_reality_fallback_grpc_inbounds.json
         fi
 
-        # hysteria
-        if echo "${currentInstallProtocolType}" | grep -q "6"; then
+        # hysteria2
+        if echo ${currentInstallProtocolType} | grep -q 6; then
             local clients=
             clients=$(initXrayClients 6 "${uuid}" "${email}")
 
-            clients=$(jq -r ".auth.config = ${clients}" ${hysteriaConfigPath}config.json)
-            echo "${clients}" | jq . >${hysteriaConfigPath}config.json
+            clients=$(jq -r ".inbounds[0].users = ${clients}" "${singBoxConfigPath}config/hysteria2.json")
+            echo "${clients}" | jq . >"${singBoxConfigPath}config/hysteria2.json"
         fi
 
+        # tuic
         if echo ${currentInstallProtocolType} | grep -q 9; then
-            local tuicResult
+            local clients=
+            clients=$(initXrayClients 9 "${uuid}" "${email}")
 
-            tuicResult=$(jq -r ".users.\"${uuid}\" += \"${uuid}\"" "${tuicConfigPath}config.json")
-            echo "${tuicResult}" | jq . >"${tuicConfigPath}config.json"
+            clients=$(jq -r ".inbounds[0].users = ${clients}" "${singBoxConfigPath}config/tuic.json")
+
+            echo "${hysteriaResult}" | jq . >"${singBoxConfigPath}config/tuic.json"
         fi
     done
 
@@ -5071,11 +5283,20 @@ addUser() {
             trojanTCPResult=$(jq -r ".inbounds[0].settings.clients += [${trojanUsers}]" ${configPath}04_trojan_TCP_inbounds.json)
             echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
         fi
-
+        # hysteria2
         if echo ${currentInstallProtocolType} | grep -q 6; then
             local hysteriaResult
-            hysteriaResult=$(jq -r ".auth.config += [\"${uuid}\"]" ${hysteriaConfigPath}config.json)
-            echo "${hysteriaResult}" | jq . >${hysteriaConfigPath}config.json
+            users="{\"password\":\"${uuid}\",\"name\":\"${email}_singbox_hysteria2\"}"
+            hysteriaResult=$(jq -r ".inbounds[0].users += [${users}]" "${singBoxConfigPath}config/hysteria2.json")
+            echo "${hysteriaResult}" | jq . >"${hysteriaConfigPath}config/hysteria2.json"
+        fi
+
+        # tuic
+        if echo ${currentInstallProtocolType} | grep -q 9; then
+            local hysteriaResult
+            users="{\"password\":\"${uuid}\",\"uuid\":\"${uuid}\",\"name\":\"${email}_singbox_tuic\"}"
+            hysteriaResult=$(jq -r ".inbounds[0].users += [\"${uuid}\"]" "${hysteriaConfigPath}config/tuic.json")
+            echo "${hysteriaResult}" | jq . >"${hysteriaConfigPath}config/tuic.json"
         fi
     done
 
@@ -5144,12 +5365,6 @@ removeUser() {
             echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
         fi
 
-        if echo ${currentInstallProtocolType} | grep -q 6; then
-            local hysteriaResult
-            hysteriaResult=$(jq -r 'del(.auth.config['${delUserIndex}'])' ${hysteriaConfigPath}config.json)
-            echo "${hysteriaResult}" | jq . >${hysteriaConfigPath}config.json
-        fi
-
         if echo ${currentInstallProtocolType} | grep -q 7; then
             local vlessRealityResult
             vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
@@ -5161,10 +5376,15 @@ removeUser() {
             echo "${vlessRealityGRPCResult}" | jq . >${configPath}08_VLESS_reality_fallback_grpc_inbounds.json
         fi
 
+        if echo ${currentInstallProtocolType} | grep -q 6; then
+            local hysteriaResult
+            hysteriaResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}config/hysteria2.json")
+            echo "${hysteriaResult}" | jq . >"${singBoxConfigPath}config/hysteria2.json"
+        fi
         if echo ${currentInstallProtocolType} | grep -q 9; then
             local tuicResult
-            tuicResult=$(jq -r "del(.users.\"${uuid}\")" "${tuicConfigPath}config.json")
-            echo "${tuicResult}" | jq . >"${tuicConfigPath}config.json"
+            tuicResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}config/tuic.json")
+            echo "${tuicResult}" | jq . >"${singBoxConfigPath}config/tuic.json"
         fi
         reloadCore
     fi
@@ -6324,19 +6544,24 @@ reloadCore() {
     if [[ "${coreInstallType}" == "1" ]]; then
         handleXray stop
         handleXray start
-    elif [[ "${coreInstallType}" == "2" ]]; then
-        handleV2Ray stop
-        handleV2Ray start
+        #    elif [[ "${coreInstallType}" == "2" ]]; then
+        #        handleV2Ray stop
+        #        handleV2Ray start
     fi
 
-    if [[ -n "${hysteriaConfigPath}" ]]; then
-        handleHysteria stop
-        handleHysteria start
-    fi
+    #    if [[ -n "${hysteriaConfigPath}" ]]; then
+    #        handleHysteria stop
+    #        handleHysteria start
+    #    fi
 
-    if [[ -n "${tuicConfigPath}" ]]; then
-        handleTuic stop
-        handleTuic start
+    #    if [[ -n "${tuicConfigPath}" ]]; then
+    #        handleTuic stop
+    #        handleTuic start
+    #    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        handleSingBox stop
+        handleSingBox start
     fi
 }
 
@@ -6666,7 +6891,7 @@ selectCoreInstall() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 选择核心安装"
     echoContent red "\n=============================================================="
     echoContent yellow "1.Xray-core"
-    echoContent yellow "2.v2ray-core"
+    #    echoContent yellow "2.sing-box"
     echoContent red "=============================================================="
     read -r -p "请选择:" selectCoreType
     case ${selectCoreType} in
@@ -6803,29 +7028,30 @@ hysteriaCoreInstall() {
 }
 # 卸载 hysteria
 unInstallHysteriaCore() {
+    if [[ -n "${hysteriaConfigPath}" ]]; then
+        echoContent yellow " ---> 新版本依赖sing-box，检测到旧版本hysteria，执行卸载操作"
 
-    if [[ -z "${hysteriaConfigPath}" ]]; then
-        echoContent red "\n ---> 未安装"
-        exit 0
+        deleteHysteriaPortHoppingRules
+        handleHysteria stop
+        rm -rf /etc/v2ray-agent/hysteria/*
+        rm ${configPath}02_socks_inbounds_hysteria.json
+        rm -rf /etc/systemd/system/hysteria.service
+        echoContent green " ---> 卸载完成"
     fi
-    deleteHysteriaPortHoppingRules
-    handleHysteria stop
-    rm -rf /etc/v2ray-agent/hysteria/*
-    rm ${configPath}02_socks_inbounds_hysteria.json
-    rm -rf /etc/systemd/system/hysteria.service
-    echoContent green " ---> 卸载完成"
 }
+
 # 卸载Tuic
 unInstallTuicCore() {
 
-    if [[ -z "${tuicConfigPath}" ]]; then
-        echoContent red "\n ---> 未安装"
-        exit 0
+    if [[ -n "${tuicConfigPath}" ]]; then
+        echoContent yellow " ---> 新版本依赖sing-box，检测到旧版本Tuic，执行卸载操作"
+
+        handleTuic stop
+        rm -rf /etc/v2ray-agent/tuic/*
+        rm -rf /etc/systemd/system/tuic.service
+        echoContent green " ---> 卸载完成"
     fi
-    handleTuic stop
-    rm -rf /etc/v2ray-agent/tuic/*
-    rm -rf /etc/systemd/system/tuic.service
-    echoContent green " ---> 卸载完成"
+
 }
 unInstallXrayCoreReality() {
 
@@ -7754,32 +7980,28 @@ manageReality() {
 
 # hysteria管理
 manageHysteria() {
-    echoContent skyBlue "\n进度  1/1 : Hysteria管理"
+    echoContent skyBlue "\n进度  1/1 : Hysteria2 管理"
     echoContent red "\n=============================================================="
-    local hysteriaStatus=
-    if [[ -n "${hysteriaConfigPath}" ]]; then
+    local hysteria2Status=
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]] && grep -q 'hysteria2' </etc/v2ray-agent/sing-box/conf/config.json; then
+        echoContent yellow " 依赖第三方sing-box\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
-        #        echoContent yellow "3.端口跳跃管理"
-        echoContent yellow "3.core管理"
-        echoContent yellow "4.查看日志"
-        hysteriaStatus=true
+        echoContent yellow "3.sing-box core管理"
+        hysteria2Status=true
     else
         echoContent yellow "1.安装"
     fi
 
     echoContent red "=============================================================="
-    read -r -p "请选择:" installHysteriaStatus
-    if [[ "${installHysteriaStatus}" == "1" ]]; then
-        hysteriaCoreInstall
-    elif [[ "${installHysteriaStatus}" == "2" && "${hysteriaStatus}" == "true" ]]; then
+    read -r -p "请选择:" installHysteria2Status
+    if [[ "${installHysteria2Status}" == "1" ]]; then
         unInstallHysteriaCore
-        #    elif [[ "${installHysteriaStatus}" == "3" && "${hysteriaStatus}" == "true" ]]; then
-        #        hysteriaPortHoppingMenu
-    elif [[ "${installHysteriaStatus}" == "3" && "${hysteriaStatus}" == "true" ]]; then
-        hysteriaVersionManageMenu 1
-    elif [[ "${installHysteriaStatus}" == "4" && "${hysteriaStatus}" == "true" ]]; then
-        journalctl -fu hysteria
+        singBoxHysteria2Install
+    elif [[ "${installHysteria2Status}" == "2" && "${hysteria2Status}" == "true" ]]; then
+        unInstallSingBox hysteria2
+    elif [[ "${installHysteria2Status}" == "3" && "${hysteria2Status}" == "true" ]]; then
+        singBoxVersionManageMenu 1
     fi
 }
 
@@ -7788,11 +8010,11 @@ manageTuic() {
     echoContent skyBlue "\n进度  1/1 : Tuic管理"
     echoContent red "\n=============================================================="
     local tuicStatus=
-    if [[ -n "${tuicConfigPath}" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config.json" ]] && grep -q 'tuic' </etc/v2ray-agent/sing-box/conf/config.json; then
+        echoContent yellow " 依赖第三方sing-box\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
-        echoContent yellow "3.core管理"
-        echoContent yellow "4.查看日志"
+        echoContent yellow "3.sing-box core管理"
         tuicStatus=true
     else
         echoContent yellow "1.安装"
@@ -7801,14 +8023,29 @@ manageTuic() {
     echoContent red "=============================================================="
     read -r -p "请选择:" installTuicStatus
     if [[ "${installTuicStatus}" == "1" ]]; then
-        tuicCoreInstall
-    elif [[ "${installTuicStatus}" == "2" && "${tuicStatus}" == "true" ]]; then
         unInstallTuicCore
+        singBoxTuicInstall
+    elif [[ "${installTuicStatus}" == "2" && "${tuicStatus}" == "true" ]]; then
+        unInstallSingBox tuic
     elif [[ "${installTuicStatus}" == "3" && "${tuicStatus}" == "true" ]]; then
-        tuicVersionManageMenu 1
-    elif [[ "${installTuicStatus}" == "4" && "${tuicStatus}" == "true" ]]; then
-        journalctl -fu tuic
+        singBoxVersionManageMenu 1
     fi
+}
+# sing-box log日志
+singBoxLog() {
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/log.json
+        {
+          "log": {
+            "disabled": $1,
+            "level": "debug",
+            "output": "/etc/v2ray-agent/sing-box/box.log",
+            "timestamp": true
+          }
+        }
+EOF
+
+    handleSingBox stop
+    handleSingBox start
 }
 # hysteria版本管理
 hysteriaVersionManageMenu() {
@@ -7836,6 +8073,50 @@ hysteriaVersionManageMenu() {
     elif [[ "${selectHysteriaType}" == "4" ]]; then
         handleHysteria stop
         handleHysteria start
+    fi
+}
+
+# sing-box 版本管理
+singBoxVersionManageMenu() {
+    echoContent skyBlue "\n进度  $1/${totalProgress} : sing-box 版本管理"
+    if [[ ! -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+        echoContent red " ---> 没有检测到安装程序，请执行脚本安装内容"
+        menu
+        exit 0
+    fi
+    echoContent red "\n=============================================================="
+    echoContent yellow "1.升级 sing-box"
+    echoContent yellow "2.关闭 sing-box"
+    echoContent yellow "3.打开 sing-box"
+    echoContent yellow "4.重启 sing-box"
+    echoContent yellow "=============================================================="
+    local logStatus=
+    if [[ -n "${singBoxConfigPath}" && "$(jq -r .log.disabled ${singBoxConfigPath}config.json)" == "true" ]]; then
+        echoContent yellow "5.关闭日志"
+        logStatus=true
+    else
+        echoContent yellow "5.启用日志"
+        logStatus=false
+    fi
+
+    echoContent yellow "6.查看日志"
+    echoContent red "=============================================================="
+
+    read -r -p "请选择:" selectTuicType
+    if [[ "${selectTuicType}" == "1" ]]; then
+        installSingBox 1
+        handleSingBox start
+    elif [[ "${selectTuicType}" == "2" ]]; then
+        handleSingBox stop
+    elif [[ "${selectTuicType}" == "3" ]]; then
+        handleSingBox start
+    elif [[ "${selectTuicType}" == "4" ]]; then
+        handleSingBox stop
+        handleSingBox start
+    elif [[ "${selectTuicType}" == "5" ]]; then
+        singBoxLog ${logStatus}
+    elif [[ "${selectTuicType}" == "6" ]]; then
+        tail -f "${singBoxConfigPath}../box.log"
     fi
 }
 
@@ -7872,7 +8153,7 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "作者：mack-a"
-    echoContent green "当前版本：v2.10.22"
+    echoContent green "当前版本：v2.11.4"
     echoContent green "Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "描述：八合一共存脚本\c"
     showInstallStatus
@@ -7896,7 +8177,7 @@ menu() {
         echoContent yellow "3.切换Trojan[XTLS]"
     fi
 
-    echoContent yellow "4.Hysteria管理"
+    echoContent yellow "4.Hysteria2管理"
     echoContent yellow "5.REALITY管理"
     echoContent yellow "6.Tuic管理"
     echoContent skyBlue "-------------------------工具管理-----------------------------"
